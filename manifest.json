@@ -1,0 +1,11 @@
+{
+	"id": "syncronizer-plagin",
+	"name": "The Syncronizer",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Плагин для синхронизации с облачными хранилищами (яндекс диск, гугл диск и другие)",
+	"author": "MyrzaBlack",
+	"authorUrl": "",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}
