@@ -1,7 +1,9 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
-
-// Remember to rename these classes and interfaces!
+import { App, Editor, MarkdownView, Modal, Notice, Plugin } from "obsidian";
+import { DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab } from "./settings";
+import { syncWithYandex } from "./yandex/sync";
+import { syncWithYandexWebdav } from "./yandex/sync-webdav";
+import { YandexDiskApiError } from "./yandex/api";
+import { YandexWebdavError } from "./yandex/webdav";
 
 export default class SyncronizerPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -9,68 +11,160 @@ export default class SyncronizerPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// Иконка синхронизации с Яндекс.Диском в левой панели
+		this.addRibbonIcon("cloud", "Синхронизация с Яндекс.Диском", () => {
+			this.runYandexSync();
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+		// Кнопка синхронизации в строке состояния внизу окна
+		const statusBarItem = this.addStatusBarItem();
+		statusBarItem.createEl("span", { cls: "syncronizer-status-bar clickable" }, (el) => {
+			el.textContent = "☁ Синхронизация";
+			el.title = "Синхронизировать с Яндекс.Диском";
+			el.addEventListener("click", () => this.runYandexSync());
+		});
 
-		// This adds a simple command that can be triggered anywhere
+		// Команда: синхронизация с Яндекс.Диском
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
+			id: "yandex-sync",
+			name: "Синхронизировать с Яндекс.Диском",
+			callback: () => this.runYandexSync(),
+		});
+
+		// Остальные команды (образец)
+		this.addCommand({
+			id: "open-modal-simple",
+			name: "Open modal (simple)",
 			callback: () => {
 				new SampleModal(this.app).open();
-			}
+			},
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
 		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
+			id: "replace-selected",
+			name: "Replace selected content",
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
+				editor.replaceSelection("Sample editor command");
+			},
 		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
+			id: "open-modal-complex",
+			name: "Open modal (complex)",
 			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				const markdownView =
+					this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
 					if (!checking) {
 						new SampleModal(this.app).open();
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
 					return true;
 				}
 				return false;
-			}
+			},
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new SampleSettingTab(this.app, this));
+	}
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
+	async runYandexSync(): Promise<void> {
+		const method = this.settings.yandexSyncMethod || "api";
+		const folder = this.settings.yandexSyncFolder?.trim() || "Obsidian";
+		const direction = this.settings.yandexSyncDirection;
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		if (method === "api") {
+			const token = this.settings.yandexAccessToken?.trim();
+			if (!token) {
+				new Notice("Укажите OAuth-токен Яндекс.Диска в настройках плагина.");
+				return;
+			}
+			new Notice("Синхронизация с Яндекс.Диском (REST API)…");
+			try {
+				const result = await syncWithYandex(this.app, token, folder, direction);
+				this.showSyncResult(result, () => {
+					new Notice(
+						"Токен недействителен или истёк. Откройте настройки плагина → получите новый токен (кнопка «Открыть страницу авторизации»).",
+						8000
+					);
+				});
+			} catch (e) {
+				this.handleSyncError(e, "api");
+			}
+			return;
+		}
 
-		this.addRibbonIcon('dice', 'Greet', () => {
-			new Notice('Hello, world!');
-		});
+		// WebDAV
+		const url = this.settings.yandexWebdavUrl?.trim() || "https://webdav.yandex.ru";
+		const login = this.settings.yandexWebdavLogin?.trim();
+		const password = this.settings.yandexWebdavPassword ?? "";
+		if (!login) {
+			new Notice("Укажите логин и пароль WebDAV в настройках плагина.");
+			return;
+		}
+		new Notice("Синхронизация с Яндекс.Диском (WebDAV)…");
+		try {
+			const result = await syncWithYandexWebdav(
+				this.app,
+				url,
+				login,
+				password,
+				folder,
+				direction
+			);
+			this.showSyncResult(result, () => {
+				new Notice(
+					"Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
+					8000
+				);
+			});
+		} catch (e) {
+			this.handleSyncError(e, "webdav");
+		}
+	}
+
+	private showSyncResult(
+		result: { uploaded: number; downloaded: number; errors: string[] },
+		onAuthError: () => void
+	): void {
+		const msg = [
+			`Выгружено: ${result.uploaded}`,
+			`Загружено: ${result.downloaded}`,
+		].join(", ");
+		new Notice(result.errors.length ? `${msg}. Ошибки: ${result.errors.length}` : msg);
+		if (result.errors.length > 0) {
+			console.error("Synchronizer Yandex errors:", result.errors);
+			if (
+				result.errors.some((err) =>
+					err.includes("401") || err.includes("403") || err.includes("Не авторизован")
+				)
+			) {
+				onAuthError();
+			}
+		}
+	}
+
+	private handleSyncError(e: unknown, method: "api" | "webdav"): void {
+		const message =
+			e instanceof YandexDiskApiError || e instanceof YandexWebdavError
+				? e.message
+				: e instanceof Error
+					? e.message
+					: String(e);
+		new Notice("Ошибка синхронизации: " + message);
+		if (e instanceof YandexDiskApiError && e.status === 401) {
+			new Notice(
+				"Токен недействителен или истёк. Настройки плагина → «Открыть страницу авторизации» → вставьте новый токен.",
+				8000
+			);
+		} else if (e instanceof YandexWebdavError && (e.status === 401 || e.status === 403)) {
+			new Notice("Неверный логин или пароль WebDAV. Проверьте настройки плагина.", 8000);
+		} else if (message.includes("401") || message.includes("Не авторизован")) {
+			new Notice(
+				method === "api"
+					? "Токен недействителен или истёк. Получите новый токен в настройках плагина."
+					: "Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
+				8000
+			);
+		}
+		console.error("Synchronizer Yandex sync error:", e);
 	}
 
 	onunload() {
