@@ -1,11 +1,49 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab } from "./settings";
+import {
+	DEFAULT_SETTINGS,
+	MyPluginSettings,
+	SampleSettingTab,
+	type SyncTarget,
+} from "./settings";
 import { syncWithYandex } from "./yandex/sync";
 import { syncWithYandexWebdav } from "./yandex/sync-webdav";
-import { YandexDiskApiError } from "./yandex/api";
-import { YandexWebdavError } from "./yandex/webdav";
-import { GoogleDriveApi, GoogleDriveApiError } from "./google-drive/api";
+import { GoogleDriveApi } from "./google-drive/api";
 import { syncWithGoogleDrive } from "./google-drive/sync";
+
+function generateId(): string {
+	return "sync-" + Math.random().toString(36).slice(2, 11);
+}
+
+/** Создать целевой объект по умолчанию с возможностью .with(partial) для миграции */
+function defaultTarget(
+	method: "yandex" | "google-drive" | "webdav",
+): SyncTarget & {
+	with: (p: Partial<SyncTarget>) => SyncTarget;
+} {
+	const t: SyncTarget = {
+		id: generateId(),
+		method,
+		enabled: true,
+		folder: "Obsidian",
+		direction: "both",
+		yandexClientId: "",
+		yandexAccessToken: "",
+		webdavUrl: "",
+		webdavLogin: "",
+		webdavPassword: "",
+		googleDriveClientId: "",
+		googleDriveClientSecret: "",
+		googleDriveAccessToken: "",
+		googleDriveRefreshToken: "",
+		googleDriveExpiryDate: 0,
+	};
+	return {
+		...t,
+		with(p: Partial<SyncTarget>) {
+			return { ...t, ...p };
+		},
+	};
+}
 
 export default class SyncronizerPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -13,217 +51,170 @@ export default class SyncronizerPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// Иконка синхронизации с Яндекс.Диском в левой панели
-		this.addRibbonIcon("cloud", "Синхронизация с Яндекс.Диском", () => {
-			this.runYandexSync();
-		});
-		this.addRibbonIcon("cloud-upload", "Синхронизация с Google Drive", () => {
-			this.runGoogleDriveSync();
-		});
-		this.addRibbonIcon("folder-sync", "Синхронизация по WebDAV", () => {
-			this.runWebdavSync();
+		// Одна иконка синхронизации в левой панели — запускает все включённые способы
+		this.addRibbonIcon("folder-sync", "Синхронизировать", () => {
+			this.runAllEnabledSyncs();
 		});
 
-		// Кнопка синхронизации в строке состояния внизу окна
 		const statusBarItem = this.addStatusBarItem();
-		statusBarItem.createEl("span", { cls: "syncronizer-status-bar clickable" }, (el) => {
-			el.textContent = "☁ Синхронизация";
-			el.title = "Синхронизировать: Яндекс / Google Drive / WebDAV (см. команды)";
-			el.addEventListener("click", () => this.runYandexSync());
-		});
+		statusBarItem.createEl(
+			"span",
+			{ cls: "syncronizer-status-bar clickable" },
+			(el) => {
+				el.textContent = "☁ Синхронизация";
+				el.title = "Синхронизировать по всем включённым способам";
+				el.addEventListener("click", () => this.runAllEnabledSyncs());
+			},
+		);
 
-		// Команда: синхронизация с Яндекс.Диском
 		this.addCommand({
-			id: "yandex-sync",
-			name: "Синхронизировать с Яндекс.Диском",
-			callback: () => this.runYandexSync(),
-		});
-		this.addCommand({
-			id: "google-drive-sync",
-			name: "Синхронизировать с Google Drive",
-			callback: () => this.runGoogleDriveSync(),
-		});
-		this.addCommand({
-			id: "webdav-sync",
-			name: "Синхронизировать по WebDAV (любое облако)",
-			callback: () => this.runWebdavSync(),
-		});
-
-		// Остальные команды (образец)
-		this.addCommand({
-			id: "open-modal-simple",
-			name: "Open modal (simple)",
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
-		});
-		this.addCommand({
-			id: "replace-selected",
-			name: "Replace selected content",
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection("Sample editor command");
-			},
-		});
-		this.addCommand({
-			id: "open-modal-complex",
-			name: "Open modal (complex)",
-			checkCallback: (checking: boolean) => {
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-					return true;
-				}
-				return false;
-			},
+			id: "sync-all",
+			name: "Синхронизировать (все включённые способы)",
+			callback: () => this.runAllEnabledSyncs(),
 		});
 
 		this.addSettingTab(new SampleSettingTab(this.app, this));
 	}
 
-	async runYandexSync(): Promise<void> {
-		const token = this.settings.yandexAccessToken?.trim();
-		if (!token) {
-			new Notice("Укажите OAuth-токен Яндекс.Диска в настройках плагина.");
+	/** Запуск синхронизации по всем включённым способам */
+	async runAllEnabledSyncs(): Promise<void> {
+		const targets = this.settings.syncTargets.filter((t) => t.enabled);
+		if (targets.length === 0) {
+			new Notice(
+				"Нет включённых способов синхронизации. Добавьте способ в настройках и включите его.",
+			);
 			return;
 		}
-		const folder = this.settings.yandexSyncFolder?.trim() || "Obsidian";
-		const direction = this.settings.yandexSyncDirection;
-		new Notice("Синхронизация с Яндекс.Диском…");
-		try {
-			const result = await syncWithYandex(this.app, token, folder, direction);
-			this.showSyncResult(result, () => {
-				new Notice(
-					"Токен недействителен или истёк. Откройте настройки плагина → получите новый токен (кнопка «Открыть страницу авторизации»).",
-					8000
-				);
-			});
-		} catch (e) {
-			this.handleSyncError(e, "api");
+		new Notice(`Синхронизация (${targets.length} types) `);
+		let totalUploaded = 0;
+		let totalDownloaded = 0;
+		const allErrors: string[] = [];
+		for (const target of targets) {
+			try {
+				const result = await this.runSyncForTarget(target);
+				totalUploaded += result.uploaded;
+				totalDownloaded += result.downloaded;
+				if (result.errors.length > 0) {
+					allErrors.push(...result.errors);
+				}
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				new Notice(`Ошибка (${target.method}): ${msg}`);
+				allErrors.push(`${target.method}: ${msg}`);
+			}
 		}
+		this.showSyncResult(
+			{
+				uploaded: totalUploaded,
+				downloaded: totalDownloaded,
+				errors: allErrors,
+			},
+			() => {
+				new Notice(
+					"Обнаружены ошибки доступа (401/403). Проверьте учётные данные в настройках.",
+					8000,
+				);
+			},
+		);
 	}
 
-	async runGoogleDriveSync(): Promise<void> {
-		const clientId = this.settings.googleDriveClientId?.trim();
-		const clientSecret = this.settings.googleDriveClientSecret?.trim();
-		const accessToken = this.settings.googleDriveAccessToken?.trim();
-		if (!clientId || !clientSecret || !accessToken) {
-			new Notice(
-				"Настройте Google Drive: Client ID, Client Secret и получите токены в настройках плагина."
-			);
-			return;
-		}
-		const folder = this.settings.googleDriveSyncFolder?.trim() || "Obsidian";
-		const direction = this.settings.googleDriveSyncDirection;
-		new Notice("Синхронизация с Google Drive…");
-		try {
-			const api = new GoogleDriveApi(
-				{
-					access_token: accessToken,
-					refresh_token: this.settings.googleDriveRefreshToken || undefined,
-					expiry_date: this.settings.googleDriveExpiryDate || undefined,
-				},
-				clientId,
-				clientSecret
-			);
-			const result = await syncWithGoogleDrive(
-				this.app,
-				api,
-				folder,
-				direction
-			);
-			const updated = api.getTokens();
-			this.settings.googleDriveAccessToken = updated.access_token;
-			if (updated.refresh_token)
-				this.settings.googleDriveRefreshToken = updated.refresh_token;
-			if (updated.expiry_date)
-				this.settings.googleDriveExpiryDate = updated.expiry_date;
-			await this.saveSettings();
-			this.showSyncResult(result, () => {
-				new Notice(
-					"Токен Google Drive недействителен. Получите новые токены в настройках плагина.",
-					8000
-				);
-			});
-		} catch (e) {
-			this.handleGoogleDriveSyncError(e);
-		}
-	}
+	/** Синхронизация по одному способу */
+	private async runSyncForTarget(
+		target: SyncTarget,
+	): Promise<{ uploaded: number; downloaded: number; errors: string[] }> {
+		const folder = target.folder?.trim() || "Obsidian";
+		const direction = target.direction;
 
-	async runWebdavSync(): Promise<void> {
-		const url = this.settings.webdavUrl?.trim();
-		const login = this.settings.webdavLogin?.trim();
-		const password = this.settings.webdavPassword ?? "";
-		if (!url) {
-			new Notice(
-				"Укажите WebDAV URL в настройках плагина (раздел «WebDAV (любое облако)»)."
-			);
-			return;
+		if (target.method === "yandex") {
+			const token = target.yandexAccessToken?.trim();
+			if (!token) {
+				return {
+					uploaded: 0,
+					downloaded: 0,
+					errors: ["Яндекс: нет токена"],
+				};
+			}
+			return await syncWithYandex(this.app, token, folder, direction);
 		}
-		if (!login) {
-			new Notice("Укажите логин WebDAV в настройках плагина.");
-			return;
-		}
-		const folder = this.settings.webdavSyncFolder?.trim() || "Obsidian";
-		const direction = this.settings.webdavSyncDirection;
-		new Notice("Синхронизация по WebDAV…");
-		try {
-			const result = await syncWithYandexWebdav(
+
+		if (target.method === "webdav") {
+			const url = target.webdavUrl?.trim();
+			const login = target.webdavLogin?.trim();
+			const password = target.webdavPassword ?? "";
+			if (!url || !login) {
+				return {
+					uploaded: 0,
+					downloaded: 0,
+					errors: ["WebDAV: нет URL или логина"],
+				};
+			}
+			return await syncWithYandexWebdav(
 				this.app,
 				url,
 				login,
 				password,
 				folder,
-				direction
+				direction,
 			);
-			this.showSyncResult(result, () => {
-				new Notice(
-					"Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
-					8000
-				);
-			});
-		} catch (e) {
-			this.handleSyncError(e, "webdav");
 		}
-	}
 
-	private handleGoogleDriveSyncError(e: unknown): void {
-		const message =
-			e instanceof GoogleDriveApiError
-				? e.message
-				: e instanceof Error
-					? e.message
-					: String(e);
-		new Notice("Ошибка синхронизации Google Drive: " + message);
-		if (
-			message.includes("401") ||
-			message.includes("invalid_grant") ||
-			message.includes("Token")
-		) {
-			new Notice(
-				"Токен недействителен или истёк. Настройки плагина → Google Drive → «Получить токены».",
-				8000
-			);
+		// Google Drive
+		const clientId = target.googleDriveClientId?.trim();
+		const clientSecret = target.googleDriveClientSecret?.trim();
+		const accessToken = target.googleDriveAccessToken?.trim();
+		if (!clientId || !clientSecret || !accessToken) {
+			return {
+				uploaded: 0,
+				downloaded: 0,
+				errors: ["Google Drive: нет токенов"],
+			};
 		}
-		console.error("Synchronizer Google Drive sync error:", e);
+		const api = new GoogleDriveApi(
+			{
+				access_token: accessToken,
+				refresh_token: target.googleDriveRefreshToken || undefined,
+				expiry_date: target.googleDriveExpiryDate || undefined,
+			},
+			clientId,
+			clientSecret,
+		);
+		const result = await syncWithGoogleDrive(
+			this.app,
+			api,
+			folder,
+			direction,
+		);
+		const updated = api.getTokens();
+		target.googleDriveAccessToken = updated.access_token;
+		if (updated.refresh_token)
+			target.googleDriveRefreshToken = updated.refresh_token;
+		if (updated.expiry_date)
+			target.googleDriveExpiryDate = updated.expiry_date;
+		await this.saveSettings();
+		return result;
 	}
 
 	private showSyncResult(
 		result: { uploaded: number; downloaded: number; errors: string[] },
-		onAuthError: () => void
+		onAuthError: () => void,
 	): void {
 		const msg = [
 			`Выгружено: ${result.uploaded}`,
 			`Загружено: ${result.downloaded}`,
 		].join(", ");
-		new Notice(result.errors.length ? `${msg}. Ошибки: ${result.errors.length}` : msg);
+		new Notice(
+			result.errors.length
+				? `${msg}. Ошибки: ${result.errors.length}`
+				: msg,
+		);
 		if (result.errors.length > 0) {
-			console.error("Synchronizer Yandex errors:", result.errors);
+			console.error("Synchronizer errors:", result.errors);
 			if (
-				result.errors.some((err) =>
-					err.includes("401") || err.includes("403") || err.includes("Не авторизован")
+				result.errors.some(
+					(err) =>
+						err.includes("401") ||
+						err.includes("403") ||
+						err.includes("Не авторизован"),
 				)
 			) {
 				onAuthError();
@@ -231,37 +222,92 @@ export default class SyncronizerPlugin extends Plugin {
 		}
 	}
 
-	private handleSyncError(e: unknown, method: "api" | "webdav"): void {
-		const message =
-			e instanceof YandexDiskApiError || e instanceof YandexWebdavError
-				? e.message
-				: e instanceof Error
-					? e.message
-					: String(e);
-		new Notice("Ошибка синхронизации: " + message);
-		if (e instanceof YandexDiskApiError && e.status === 401) {
-			new Notice(
-				"Токен недействителен или истёк. Настройки плагина → «Открыть страницу авторизации» → вставьте новый токен.",
-				8000
-			);
-		} else if (e instanceof YandexWebdavError && (e.status === 401 || e.status === 403)) {
-			new Notice("Неверный логин или пароль WebDAV. Проверьте настройки плагина.", 8000);
-		} else if (message.includes("401") || message.includes("Не авторизован")) {
-			new Notice(
-				method === "api"
-					? "Токен недействителен или истёк. Получите новый токен в настройках плагина."
-					: "Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
-				8000
-			);
-		}
-		console.error("Synchronizer Yandex sync error:", e);
-	}
-
-	onunload() {
-	}
+	onunload() {}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		const data = (await this.loadData()) as Partial<MyPluginSettings> &
+			Record<string, unknown>;
+		// Миграция со старого формата (плоские ключи) в syncTargets
+		if (!data?.syncTargets?.length && data) {
+			const targets: SyncTarget[] = [];
+			if (
+				data.yandexAccessToken &&
+				typeof data.yandexAccessToken === "string" &&
+				data.yandexAccessToken.trim()
+			) {
+				targets.push(
+					defaultTarget("yandex").with({
+						yandexClientId: (data.yandexClientId as string) ?? "",
+						yandexAccessToken:
+							(data.yandexAccessToken as string) ?? "",
+						folder: (data.yandexSyncFolder as string) || "Obsidian",
+						direction:
+							(data.yandexSyncDirection as
+								| "upload"
+								| "download"
+								| "both") || "both",
+					}),
+				);
+			}
+			if (
+				data.webdavUrl &&
+				typeof data.webdavUrl === "string" &&
+				data.webdavUrl.trim()
+			) {
+				targets.push(
+					defaultTarget("webdav").with({
+						webdavUrl: (data.webdavUrl as string) ?? "",
+						webdavLogin: (data.webdavLogin as string) ?? "",
+						webdavPassword: (data.webdavPassword as string) ?? "",
+						folder: (data.webdavSyncFolder as string) || "Obsidian",
+						direction:
+							(data.webdavSyncDirection as
+								| "upload"
+								| "download"
+								| "both") || "both",
+					}),
+				);
+			}
+			if (
+				data.googleDriveAccessToken &&
+				typeof data.googleDriveAccessToken === "string" &&
+				data.googleDriveAccessToken.trim()
+			) {
+				targets.push(
+					defaultTarget("google-drive").with({
+						googleDriveClientId:
+							(data.googleDriveClientId as string) ?? "",
+						googleDriveClientSecret:
+							(data.googleDriveClientSecret as string) ?? "",
+						googleDriveAccessToken:
+							(data.googleDriveAccessToken as string) ?? "",
+						googleDriveRefreshToken:
+							(data.googleDriveRefreshToken as string) ?? "",
+						googleDriveExpiryDate:
+							(data.googleDriveExpiryDate as number) ?? 0,
+						folder:
+							(data.googleDriveSyncFolder as string) ||
+							"Obsidian",
+						direction:
+							(data.googleDriveSyncDirection as
+								| "upload"
+								| "download"
+								| "both") || "both",
+					}),
+				);
+			}
+			if (targets.length > 0) {
+				data.syncTargets = targets;
+			}
+		}
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			data,
+		) as MyPluginSettings;
+		if (!Array.isArray(this.settings.syncTargets)) {
+			this.settings.syncTargets = [];
+		}
 	}
 
 	async saveSettings() {
@@ -275,12 +321,12 @@ class SampleModal extends Modal {
 	}
 
 	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+		const { contentEl } = this;
+		contentEl.setText("Woah!");
 	}
 
 	onClose() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
 	}
 }

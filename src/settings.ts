@@ -7,53 +7,81 @@ import {
 	type GoogleDriveTokens,
 } from "./google-drive/api";
 
-export interface MyPluginSettings {
-	mySetting: string;
-	// Яндекс.Диск (только REST API)
+export type SyncMethod = "yandex" | "google-drive" | "webdav";
+export type SyncDirection = "upload" | "download" | "both";
+
+export interface SyncTarget {
+	id: string;
+	method: SyncMethod;
+	enabled: boolean;
+	folder: string;
+	direction: SyncDirection;
+	// Яндекс.Диск (REST API)
 	yandexClientId: string;
 	yandexAccessToken: string;
-	yandexSyncFolder: string;
-	yandexSyncDirection: "upload" | "download" | "both";
-	// WebDAV (любое облако: Nextcloud, ownCloud, Яндекс и т.д.)
+	// WebDAV
 	webdavUrl: string;
 	webdavLogin: string;
 	webdavPassword: string;
-	webdavSyncFolder: string;
-	webdavSyncDirection: "upload" | "download" | "both";
 	// Google Drive
 	googleDriveClientId: string;
 	googleDriveClientSecret: string;
 	googleDriveAccessToken: string;
 	googleDriveRefreshToken: string;
 	googleDriveExpiryDate: number;
-	googleDriveSyncFolder: string;
-	googleDriveSyncDirection: "upload" | "download" | "both";
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: "default",
+export interface MyPluginSettings {
+	syncTargets: SyncTarget[];
+}
+
+const DEFAULT_TARGET = (id: string, method: SyncMethod): SyncTarget => ({
+	id,
+	method,
+	enabled: true,
+	folder: "Obsidian",
+	direction: "both",
 	yandexClientId: "",
 	yandexAccessToken: "",
-	yandexSyncFolder: "Obsidian",
-	yandexSyncDirection: "both",
 	webdavUrl: "",
 	webdavLogin: "",
 	webdavPassword: "",
-	webdavSyncFolder: "Obsidian",
-	webdavSyncDirection: "both",
 	googleDriveClientId: "",
 	googleDriveClientSecret: "",
 	googleDriveAccessToken: "",
 	googleDriveRefreshToken: "",
 	googleDriveExpiryDate: 0,
-	googleDriveSyncFolder: "Obsidian",
-	googleDriveSyncDirection: "both",
+});
+
+export const DEFAULT_SETTINGS: MyPluginSettings = {
+	syncTargets: [],
 };
 
-const YANDEX_AUTH_URL = "https://oauth.yandex.ru/authorize?response_type=token&client_id=";
+const YANDEX_AUTH_URL =
+	"https://oauth.yandex.ru/authorize?response_type=token&client_id=";
 
-const YANDEX_INSTRUCTION =
-	"1) Зайдите на oauth.yandex.ru и создайте приложение. 2) Укажите Redirect URI: https://oauth.yandex.ru/verification_code. 3) Вставьте Client ID ниже и нажмите «Открыть страницу авторизации». 4) Войдите в аккаунт и скопируйте токен со страницы в поле «Токен». Для синхронизации Яндекс.Диска по WebDAV используйте раздел «WebDAV (любое облако)» с URL https://webdav.yandex.ru.";
+const METHOD_LABELS: Record<SyncMethod, string> = {
+	yandex: "Яндекс.Диск",
+	"google-drive": "Google Drive",
+	webdav: "WebDAV",
+};
+
+const SYNC_METHODS: SyncMethod[] = ["yandex", "google-drive", "webdav"];
+
+/** Доступные методы: те, что ещё не выбраны в других плашках (кроме текущей) */
+function availableMethods(
+	syncTargets: SyncTarget[],
+	currentId: string,
+): SyncMethod[] {
+	const used = new Set(
+		syncTargets.filter((t) => t.id !== currentId).map((t) => t.method),
+	);
+	return SYNC_METHODS.filter((m) => !used.has(m));
+}
+
+function generateId(): string {
+	return "sync-" + Math.random().toString(36).slice(2, 11);
+}
 
 export class SampleSettingTab extends PluginSettingTab {
 	plugin: SyncronizerPlugin;
@@ -65,223 +93,266 @@ export class SampleSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
-
 		containerEl.empty();
 
-		// ——— Яндекс.Диск (REST API) ———
-		containerEl.createEl("h2", { text: "Яндекс.Диск" });
-		const yandexInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
-		yandexInstr.createEl("strong", { text: "Как подключить: " });
-		yandexInstr.appendText(YANDEX_INSTRUCTION);
-		const apiSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
-		new Setting(apiSection)
-			.setName("Client ID")
-			.setDesc("ID приложения из OAuth (oauth.yandex.ru)")
-			.addText((text) =>
-				text
-					.setPlaceholder("Client ID")
-					.setValue(this.plugin.settings.yandexClientId)
-					.onChange(async (value) => {
-						this.plugin.settings.yandexClientId = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(apiSection)
-			.setName("OAuth-токен")
-			.setDesc("Токен со страницы авторизации")
-			.addText((text) => {
-				text
-					.setPlaceholder("Вставьте токен")
-					.setValue(this.plugin.settings.yandexAccessToken)
-					.onChange(async (value) => {
-						this.plugin.settings.yandexAccessToken = value;
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = "password";
-			});
-		new Setting(apiSection)
-			.setName("Получить токен")
-			.setDesc("Открыть страницу авторизации в браузере")
-			.addButton((btn) =>
-				btn.setButtonText("Открыть страницу авторизации").onClick(() => {
-					const clientId = this.plugin.settings.yandexClientId?.trim();
-					if (!clientId) return;
-					window.open(YANDEX_AUTH_URL + encodeURIComponent(clientId), "_blank");
-				})
-			);
+		const targets = this.plugin.settings.syncTargets;
+		const usedMethods = new Set(targets.map((t) => t.method));
+		const canAdd = targets.length < SYNC_METHODS.length;
 
-		// Папка и направление (Яндекс)
-		new Setting(containerEl)
-			.setName("Папка на Яндекс.Диске")
-			.setDesc("Путь к папке для синхронизации (например: Obsidian или Backup/Vault). Для WebDAV с Яндексом используйте раздел «WebDAV (любое облако)».")
-			.addText((text) =>
-				text
-					.setPlaceholder("Obsidian")
-					.setValue(this.plugin.settings.yandexSyncFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.yandexSyncFolder = (value || "Obsidian").replace(/^\/+/, "");
-						await this.plugin.saveSettings();
-					})
-			);
+		containerEl.createEl("h2", { text: "Способы синхронизации" });
+		containerEl.createEl("p", {
+			text: "Добавьте один или несколько способов. При нажатии на иконку синхронизации в боковой панели выполняются все включённые.",
+		});
 
-		new Setting(containerEl)
-			.setName("Направление синхронизации")
-			.setDesc("Что синхронизировать с Яндекс.Диском")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("both", "Двусторонняя (загрузка и выгрузка)")
-					.addOption("upload", "Только выгрузка (хранилище → Диск)")
-					.addOption("download", "Только загрузка (Диск → хранилище)")
-					.setValue(this.plugin.settings.yandexSyncDirection)
-					.onChange(async (value: "upload" | "download" | "both") => {
-						this.plugin.settings.yandexSyncDirection = value;
-						await this.plugin.saveSettings();
-					})
-			);
+		targets.forEach((target, index) => {
+			this.renderTargetCard(containerEl, target, index);
+		});
 
-		// ——— WebDAV (любое облако) ———
-		containerEl.createEl("h2", { text: "WebDAV (любое облако)" });
-		const wdInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
-		wdInstr.createEl("strong", { text: "Подходит для: " });
-		wdInstr.appendText(
-			"Nextcloud, ownCloud, Яндекс.Диск, Synology, InfiniCLOUD, Box, Dropbox (через WebDAV) и других сервисов с поддержкой WebDAV. Укажите URL сервера (например https://nextcloud.example.com/remote.php/dav/files/USERNAME/), логин и пароль."
-		);
-		const wdSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
-		new Setting(wdSection)
-			.setName("WebDAV URL")
-			.setDesc("Адрес WebDAV (корень хранилища или папки)")
-			.addText((text) =>
-				text
-					.setPlaceholder("https://webdav.example.com/ или https://webdav.yandex.ru")
-					.setValue(this.plugin.settings.webdavUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.webdavUrl = (value || "").trim();
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(wdSection)
-			.setName("Логин")
-			.setDesc("Логин WebDAV")
-			.addText((text) =>
-				text
-					.setPlaceholder("Логин")
-					.setValue(this.plugin.settings.webdavLogin)
-					.onChange(async (value) => {
-						this.plugin.settings.webdavLogin = value;
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(wdSection)
-			.setName("Пароль")
-			.setDesc("Пароль WebDAV")
-			.addText((text) => {
-				text
-					.setPlaceholder("Пароль")
-					.setValue(this.plugin.settings.webdavPassword)
-					.onChange(async (value) => {
-						this.plugin.settings.webdavPassword = value;
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = "password";
-			});
-		new Setting(containerEl)
-			.setName("Папка на WebDAV")
-			.setDesc(
-				"Путь к папке для синхронизации относительно URL (например: Obsidian или Backup/Vault). Для Nextcloud — подпапка в вашем пространстве файлов."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("Obsidian")
-					.setValue(this.plugin.settings.webdavSyncFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.webdavSyncFolder = (value || "Obsidian").replace(
-							/^\/+/,
-							""
+		// Кнопка +
+		const addRow = containerEl.createDiv({ cls: "synchronizer-add-row" });
+		new Setting(addRow)
+			.setName("")
+			.setDesc("")
+			.addButton((btn) => {
+				btn.setButtonText("+ Добавить способ")
+					.setCta()
+					.onClick(async () => {
+						const available = availableMethods(targets, "");
+						const method = available[0] ?? "yandex";
+						this.plugin.settings.syncTargets.push(
+							DEFAULT_TARGET(generateId(), method),
 						);
 						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Направление синхронизации (WebDAV)")
-			.setDesc("Что синхронизировать по WebDAV")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("both", "Двусторонняя (загрузка и выгрузка)")
-					.addOption("upload", "Только выгрузка (хранилище → WebDAV)")
-					.addOption("download", "Только загрузка (WebDAV → хранилище)")
-					.setValue(this.plugin.settings.webdavSyncDirection)
-					.onChange(async (value: "upload" | "download" | "both") => {
-						this.plugin.settings.webdavSyncDirection = value;
+						this.display();
+					});
+			});
+		if (!canAdd) {
+			const btn = addRow.querySelector("button");
+			if (btn) {
+				btn.setAttribute("disabled", "true");
+				btn.parentElement?.setAttribute(
+					"title",
+					"Добавлены все три способа. Удалите плашку, чтобы освободить способ для новой.",
+				);
+			}
+		}
+	}
+
+	private renderTargetCard(
+		containerEl: HTMLElement,
+		target: SyncTarget,
+		index: number,
+	): void {
+		const card = containerEl.createDiv({ cls: "synchronizer-target-card" });
+		const header = card.createDiv({ cls: "synchronizer-target-header" });
+		const body = card.createDiv({ cls: "synchronizer-target-body" });
+
+		// Выбор способа (только не занятые в других плашках)
+		const available = availableMethods(
+			this.plugin.settings.syncTargets,
+			target.id,
+		);
+		const methodOptions: Record<string, string> = {};
+		available.forEach((m) => {
+			methodOptions[m] = METHOD_LABELS[m];
+		});
+		// Если текущий метод не в available (уже занят другим — не должно быть при корректных данных), всё равно показываем его
+		if (!methodOptions[target.method]) {
+			methodOptions[target.method] = METHOD_LABELS[target.method];
+		}
+
+		const headerRow1 = header.createDiv({
+			cls: "synchronizer-target-header-row",
+		});
+		new Setting(headerRow1)
+			.setName("Выберите способ синхронизации")
+			.setDesc("")
+			.addDropdown((d) => {
+				Object.entries(methodOptions).forEach(([k, v]) =>
+					d.addOption(k, v),
+				);
+				d.setValue(target.method).onChange(
+					async (value: SyncMethod) => {
+						target.method = value;
 						await this.plugin.saveSettings();
-					})
+						this.display();
+					},
+				);
+			});
+
+		const removeBtn = headerRow1.createSpan({
+			cls: "synchronizer-target-remove",
+			attr: { title: "Удалить способ" },
+		});
+		removeBtn.setText("×");
+		removeBtn.onclick = async () => {
+			this.plugin.settings.syncTargets =
+				this.plugin.settings.syncTargets.filter(
+					(t) => t.id !== target.id,
+				);
+			await this.plugin.saveSettings();
+			this.display();
+		};
+
+		new Setting(header)
+			.setName("Активный метод")
+			.setDesc("Участвует в синхронизации по кнопке")
+			.addToggle((t) =>
+				t.setValue(target.enabled).onChange(async (v) => {
+					target.enabled = v;
+					await this.plugin.saveSettings();
+				}),
 			);
 
-		// ——— Google Drive ———
-		containerEl.createEl("h2", { text: "Google Drive" });
-		const gdInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
-		gdInstr.createEl("strong", { text: "Как подключить: " });
-		gdInstr.appendText(
-			`1) В Google Cloud Console создайте проект и включите Google Drive API. 2) Создайте учётные данные OAuth 2.0: тип «Веб-приложение» (Web application). 3) В разделе «Authorized redirect URIs» добавьте ровно такой URI: ${GOOGLE_REDIRECT_URI} (скопируйте без изменений). 4) Укажите Client ID и Client Secret ниже. 5) Нажмите «Открыть страницу авторизации», войдите в Google; после перенаправления на страницу с ошибкой (ничего не открыто на порту) скопируйте из адресной строки параметр code (часть после code= и до &) или весь URL. 6) Вставьте в поле ниже и нажмите «Получить токены».`
-		);
-		const gdSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
-		new Setting(gdSection)
-			.setName("Client ID")
-			.setDesc("Идентификатор клиента OAuth 2.0")
+		// Папка и направление (общее)
+		new Setting(body)
+			.setName("Папка на удалённом сервере")
+			.setDesc("Путь к папке для синхронизации")
 			.addText((text) =>
 				text
-					.setPlaceholder("Client ID")
-					.setValue(this.plugin.settings.googleDriveClientId)
+					.setPlaceholder("Obsidian")
+					.setValue(target.folder)
 					.onChange(async (value) => {
-						this.plugin.settings.googleDriveClientId = value;
+						target.folder = (value || "Obsidian").replace(
+							/^\/+/,
+							"",
+						);
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
-		new Setting(gdSection)
-			.setName("Client Secret")
-			.setDesc("Секрет клиента OAuth 2.0")
-			.addText((text) => {
-				text
-					.setPlaceholder("Client Secret")
-					.setValue(this.plugin.settings.googleDriveClientSecret)
-					.onChange(async (value) => {
-						this.plugin.settings.googleDriveClientSecret = value;
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = "password";
+		new Setting(body).setName("Направление").addDropdown((d) =>
+			d
+				.addOption("both", "Двусторонняя")
+				.addOption("upload", "Только выгрузка")
+				.addOption("download", "Только загрузка")
+				.setValue(target.direction)
+				.onChange(async (value: SyncDirection) => {
+					target.direction = value;
+					await this.plugin.saveSettings();
+				}),
+		);
+
+		if (target.method === "yandex") {
+			this.renderYandexSettings(body, target);
+		} else if (target.method === "webdav") {
+			this.renderWebdavSettings(body, target);
+		} else {
+			this.renderGoogleDriveSettings(body, target);
+		}
+	}
+
+	private renderYandexSettings(body: HTMLElement, target: SyncTarget): void {
+		const instr = body.createDiv({ cls: "synchronizer-instruction" });
+		instr.createEl("strong", { text: "Яндекс.Диск: " });
+		instr.appendText(
+			"OAuth на oauth.yandex.ru, Redirect URI: https://oauth.yandex.ru/verification_code. Укажите Client ID и получите токен.",
+		);
+		new Setting(body).setName("Client ID").addText((text) =>
+			text
+				.setPlaceholder("Client ID")
+				.setValue(target.yandexClientId)
+				.onChange(async (v) => {
+					target.yandexClientId = v;
+					await this.plugin.saveSettings();
+				}),
+		);
+		new Setting(body).setName("OAuth-токен").addText((text) => {
+			text.setPlaceholder("Токен")
+				.setValue(target.yandexAccessToken)
+				.onChange(async (v) => {
+					target.yandexAccessToken = v;
+					await this.plugin.saveSettings();
+				});
+			text.inputEl.type = "password";
+		});
+		new Setting(body).setName("Получить токен").addButton((btn) =>
+			btn.setButtonText("Открыть страницу авторизации").onClick(() => {
+				const id = target.yandexClientId?.trim();
+				if (!id) return;
+				window.open(YANDEX_AUTH_URL + encodeURIComponent(id), "_blank");
+			}),
+		);
+	}
+
+	private renderWebdavSettings(body: HTMLElement, target: SyncTarget): void {
+		const instr = body.createDiv({ cls: "synchronizer-instruction" });
+		instr.appendText(
+			"Nextcloud, ownCloud, Яндекс (https://webdav.yandex.ru) и др.",
+		);
+		new Setting(body).setName("WebDAV URL").addText((text) =>
+			text
+				.setPlaceholder("https://webdav.example.com/")
+				.setValue(target.webdavUrl)
+				.onChange(async (v) => {
+					target.webdavUrl = (v || "").trim();
+					await this.plugin.saveSettings();
+				}),
+		);
+		new Setting(body).setName("Логин").addText((text) =>
+			text.setValue(target.webdavLogin).onChange(async (v) => {
+				target.webdavLogin = v;
+				await this.plugin.saveSettings();
+			}),
+		);
+		new Setting(body).setName("Пароль").addText((text) => {
+			text.setValue(target.webdavPassword).onChange(async (v) => {
+				target.webdavPassword = v;
+				await this.plugin.saveSettings();
 			});
-		new Setting(gdSection)
-			.setName("Авторизация")
-			.setDesc("Открыть страницу входа в Google и получить код")
-			.addButton((btn) =>
-				btn.setButtonText("Открыть страницу авторизации").onClick(() => {
-					const id = this.plugin.settings.googleDriveClientId?.trim();
-					if (!id) {
-						new Notice("Укажите Client ID.");
-						return;
-					}
-					window.open(getGoogleAuthUrl(id), "_blank");
-				})
+			text.inputEl.type = "password";
+		});
+	}
+
+	private renderGoogleDriveSettings(
+		body: HTMLElement,
+		target: SyncTarget,
+	): void {
+		const instr = body.createDiv({ cls: "synchronizer-instruction" });
+		instr.appendText(
+			`Веб-приложение в Google Cloud, Redirect URI: ${GOOGLE_REDIRECT_URI}. Client ID, Secret, затем код из браузера → «Получить токены».`,
+		);
+		new Setting(body).setName("Client ID").addText((text) =>
+			text.setValue(target.googleDriveClientId).onChange(async (v) => {
+				target.googleDriveClientId = v;
+				await this.plugin.saveSettings();
+			}),
+		);
+		new Setting(body).setName("Client Secret").addText((text) => {
+			text.setValue(target.googleDriveClientSecret).onChange(
+				async (v) => {
+					target.googleDriveClientSecret = v;
+					await this.plugin.saveSettings();
+				},
 			);
+			text.inputEl.type = "password";
+		});
+		new Setting(body).setName("Авторизация").addButton((btn) =>
+			btn.setButtonText("Открыть страницу авторизации").onClick(() => {
+				const id = target.googleDriveClientId?.trim();
+				if (!id) {
+					new Notice("Укажите Client ID.");
+					return;
+				}
+				window.open(getGoogleAuthUrl(id), "_blank");
+			}),
+		);
 		let authCode = "";
 		const extractCode = (value: string): string => {
 			const v = value.trim();
 			const match = v.match(/[?&]code=([^&]+)/);
 			return match ? decodeURIComponent(match[1] ?? "") : v;
 		};
-		new Setting(gdSection)
+		new Setting(body)
 			.setName("Код авторизации")
-			.setDesc(
-				`Вставьте параметр code из URL после перенаправления на ${GOOGLE_REDIRECT_URI} (или весь URL)`
-			)
 			.addText((text) =>
-				text.setPlaceholder(`code=... или ${GOOGLE_REDIRECT_URI}/?code=...`).onChange((value) => {
-					authCode = extractCode(value);
-				})
+				text.setPlaceholder("code=...").onChange((v) => {
+					authCode = extractCode(v);
+				}),
 			)
 			.addButton((btn) =>
 				btn.setButtonText("Получить токены").onClick(async () => {
-					const id = this.plugin.settings.googleDriveClientId?.trim();
-					const secret = this.plugin.settings.googleDriveClientSecret?.trim();
+					const id = target.googleDriveClientId?.trim();
+					const secret = target.googleDriveClientSecret?.trim();
 					const code = authCode;
 					if (!id || !secret) {
 						new Notice("Укажите Client ID и Client Secret.");
@@ -292,56 +363,23 @@ export class SampleSettingTab extends PluginSettingTab {
 						return;
 					}
 					try {
-						const tokens: GoogleDriveTokens = await exchangeCodeForTokens(
-							id,
-							secret,
-							code
-						);
-						this.plugin.settings.googleDriveAccessToken = tokens.access_token;
-						this.plugin.settings.googleDriveRefreshToken =
-							tokens.refresh_token ?? this.plugin.settings.googleDriveRefreshToken;
-						this.plugin.settings.googleDriveExpiryDate =
-							tokens.expiry_date ?? 0;
+						const tokens: GoogleDriveTokens =
+							await exchangeCodeForTokens(id, secret, code);
+						target.googleDriveAccessToken = tokens.access_token;
+						target.googleDriveRefreshToken =
+							tokens.refresh_token ??
+							target.googleDriveRefreshToken;
+						target.googleDriveExpiryDate = tokens.expiry_date ?? 0;
 						await this.plugin.saveSettings();
-						new Notice("Токены Google Drive сохранены.");
+						new Notice("Токены сохранены.");
 						this.display();
 					} catch (e) {
 						new Notice(
-							"Ошибка получения токенов: " +
-								(e instanceof Error ? e.message : String(e))
+							"Ошибка: " +
+								(e instanceof Error ? e.message : String(e)),
 						);
 					}
-				})
-			);
-		new Setting(containerEl)
-			.setName("Папка на Google Drive")
-			.setDesc(
-				"Имя или путь к папке для синхронизации (например: Obsidian или Backup/Vault)"
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("Obsidian")
-					.setValue(this.plugin.settings.googleDriveSyncFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.googleDriveSyncFolder = (
-							value || "Obsidian"
-						).replace(/^\/+/, "");
-						await this.plugin.saveSettings();
-					})
-			);
-		new Setting(containerEl)
-			.setName("Направление синхронизации (Google Drive)")
-			.setDesc("Что синхронизировать с Google Drive")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("both", "Двусторонняя (загрузка и выгрузка)")
-					.addOption("upload", "Только выгрузка (хранилище → Drive)")
-					.addOption("download", "Только загрузка (Drive → хранилище)")
-					.setValue(this.plugin.settings.googleDriveSyncDirection)
-					.onChange(async (value: "upload" | "download" | "both") => {
-						this.plugin.settings.googleDriveSyncDirection = value;
-						await this.plugin.saveSettings();
-					})
+				}),
 			);
 	}
 }

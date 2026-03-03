@@ -1,11 +1,11 @@
 {
-	"id": "syncronizer-plagin",
-	"name": "The Syncronizer",
+	"id": "obsidian-synchronizer",
+	"name": "The Synchronizer",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Плагин для синхронизации с облачными хранилищами (яндекс диск, гугл диск и другие)",
-	"author": "MyrzaBlack",
-	"authorUrl": "",
-	"fundingUrl": "",
+	"minAppVersion": "1.5.0",
+	"description": "Sync your vault with cloud storage providers (Yandex Disk, Google Drive and others)",
+	"author": "Sergei Okhlopkov",
+	"authorUrl": "https://boosty.to/myrzablack",
+	"fundingUrl": "https://boosty.to/myrzablack/donate",
 	"isDesktopOnly": false
 }
