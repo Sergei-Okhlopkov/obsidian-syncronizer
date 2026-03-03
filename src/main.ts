@@ -20,12 +20,15 @@ export default class SyncronizerPlugin extends Plugin {
 		this.addRibbonIcon("cloud-upload", "Синхронизация с Google Drive", () => {
 			this.runGoogleDriveSync();
 		});
+		this.addRibbonIcon("folder-sync", "Синхронизация по WebDAV", () => {
+			this.runWebdavSync();
+		});
 
 		// Кнопка синхронизации в строке состояния внизу окна
 		const statusBarItem = this.addStatusBarItem();
 		statusBarItem.createEl("span", { cls: "syncronizer-status-bar clickable" }, (el) => {
 			el.textContent = "☁ Синхронизация";
-			el.title = "Синхронизировать с Яндекс.Диском / Google Drive (см. команды)";
+			el.title = "Синхронизировать: Яндекс / Google Drive / WebDAV (см. команды)";
 			el.addEventListener("click", () => this.runYandexSync());
 		});
 
@@ -39,6 +42,11 @@ export default class SyncronizerPlugin extends Plugin {
 			id: "google-drive-sync",
 			name: "Синхронизировать с Google Drive",
 			callback: () => this.runGoogleDriveSync(),
+		});
+		this.addCommand({
+			id: "webdav-sync",
+			name: "Синхронизировать по WebDAV (любое облако)",
+			callback: () => this.runWebdavSync(),
 		});
 
 		// Остальные команды (образец)
@@ -76,57 +84,24 @@ export default class SyncronizerPlugin extends Plugin {
 	}
 
 	async runYandexSync(): Promise<void> {
-		const method = this.settings.yandexSyncMethod || "api";
+		const token = this.settings.yandexAccessToken?.trim();
+		if (!token) {
+			new Notice("Укажите OAuth-токен Яндекс.Диска в настройках плагина.");
+			return;
+		}
 		const folder = this.settings.yandexSyncFolder?.trim() || "Obsidian";
 		const direction = this.settings.yandexSyncDirection;
-
-		if (method === "api") {
-			const token = this.settings.yandexAccessToken?.trim();
-			if (!token) {
-				new Notice("Укажите OAuth-токен Яндекс.Диска в настройках плагина.");
-				return;
-			}
-			new Notice("Синхронизация с Яндекс.Диском (REST API)…");
-			try {
-				const result = await syncWithYandex(this.app, token, folder, direction);
-				this.showSyncResult(result, () => {
-					new Notice(
-						"Токен недействителен или истёк. Откройте настройки плагина → получите новый токен (кнопка «Открыть страницу авторизации»).",
-						8000
-					);
-				});
-			} catch (e) {
-				this.handleSyncError(e, "api");
-			}
-			return;
-		}
-
-		// WebDAV
-		const url = this.settings.yandexWebdavUrl?.trim() || "https://webdav.yandex.ru";
-		const login = this.settings.yandexWebdavLogin?.trim();
-		const password = this.settings.yandexWebdavPassword ?? "";
-		if (!login) {
-			new Notice("Укажите логин и пароль WebDAV в настройках плагина.");
-			return;
-		}
-		new Notice("Синхронизация с Яндекс.Диском (WebDAV)…");
+		new Notice("Синхронизация с Яндекс.Диском…");
 		try {
-			const result = await syncWithYandexWebdav(
-				this.app,
-				url,
-				login,
-				password,
-				folder,
-				direction
-			);
+			const result = await syncWithYandex(this.app, token, folder, direction);
 			this.showSyncResult(result, () => {
 				new Notice(
-					"Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
+					"Токен недействителен или истёк. Откройте настройки плагина → получите новый токен (кнопка «Открыть страницу авторизации»).",
 					8000
 				);
 			});
 		} catch (e) {
-			this.handleSyncError(e, "webdav");
+			this.handleSyncError(e, "api");
 		}
 	}
 
@@ -174,6 +149,43 @@ export default class SyncronizerPlugin extends Plugin {
 			});
 		} catch (e) {
 			this.handleGoogleDriveSyncError(e);
+		}
+	}
+
+	async runWebdavSync(): Promise<void> {
+		const url = this.settings.webdavUrl?.trim();
+		const login = this.settings.webdavLogin?.trim();
+		const password = this.settings.webdavPassword ?? "";
+		if (!url) {
+			new Notice(
+				"Укажите WebDAV URL в настройках плагина (раздел «WebDAV (любое облако)»)."
+			);
+			return;
+		}
+		if (!login) {
+			new Notice("Укажите логин WebDAV в настройках плагина.");
+			return;
+		}
+		const folder = this.settings.webdavSyncFolder?.trim() || "Obsidian";
+		const direction = this.settings.webdavSyncDirection;
+		new Notice("Синхронизация по WebDAV…");
+		try {
+			const result = await syncWithYandexWebdav(
+				this.app,
+				url,
+				login,
+				password,
+				folder,
+				direction
+			);
+			this.showSyncResult(result, () => {
+				new Notice(
+					"Неверный логин или пароль WebDAV. Проверьте настройки плагина.",
+					8000
+				);
+			});
+		} catch (e) {
+			this.handleSyncError(e, "webdav");
 		}
 	}
 

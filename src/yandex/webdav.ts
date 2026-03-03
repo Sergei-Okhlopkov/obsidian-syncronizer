@@ -1,7 +1,9 @@
 /**
- * WebDAV-клиент для Яндекс.Диска
- * https://yandex.com/dev/disk/doc/en/reference/propfind.html
+ * WebDAV-клиент (подходит для любого сервера: Яндекс, Nextcloud, ownCloud и т.д.)
+ * Использует requestUrl из Obsidian для обхода CORS.
  */
+
+import { requestUrl } from "obsidian";
 
 export interface WebdavResource {
 	path: string;   // путь относительно корня (без ведущего /)
@@ -111,11 +113,16 @@ export class YandexWebdavError extends Error {
 	}
 }
 
+/** Ответ requestUrl Obsidian приводим к виду Response для единообразной обработки */
+function toResponse(obsRes: { status: number; text: string; arrayBuffer: ArrayBuffer }): Response {
+	return new Response(obsRes.arrayBuffer ?? obsRes.text, { status: obsRes.status });
+}
+
 export class YandexWebdavClient {
 	private baseUrl: string;
 	private authHeader: string;
 
-	constructor(baseUrl: string, login: string, password: string) {
+	constructor(baseUrl: string, login: string, password: string, _app?: import("obsidian").App) {
 		this.baseUrl = baseUrl.replace(/\/+$/, "");
 		const credentials = btoa(unescape(encodeURIComponent(login + ":" + password)));
 		this.authHeader = "Basic " + credentials;
@@ -132,12 +139,16 @@ export class YandexWebdavClient {
 			...options?.headers,
 		};
 		if (options?.depth != null) headers["Depth"] = String(options.depth);
-		const res = await fetch(url, {
+
+		const param: { url: string; method: string; headers: Record<string, string>; body?: string; throw: boolean } = {
+			url,
 			method,
 			headers,
-			body: options?.body,
-		});
-		return res;
+			throw: false,
+		};
+		if (options?.body != null) param.body = options.body;
+		const obsRes = await requestUrl(param);
+		return toResponse(obsRes);
 	}
 
 	/** Список элементов в папке (файлы и подпапки) */
@@ -196,11 +207,17 @@ export class YandexWebdavClient {
 		if (typeof body === "string") {
 			headers["Content-Type"] = "text/plain; charset=utf-8";
 		}
-		const res = await fetch(url, {
-			method: "PUT",
-			headers,
-			body: body as BodyInit,
-		});
+
+		const param: {
+			url: string;
+			method: string;
+			headers: Record<string, string>;
+			body?: string | ArrayBuffer;
+			throw: boolean;
+		} = { url, method: "PUT", headers, throw: false };
+		if (body != null) param.body = body;
+		const obsRes = await requestUrl(param);
+		const res = toResponse(obsRes);
 		if (!res.ok) {
 			const text = await res.text();
 			throw new YandexWebdavError(`PUT failed: ${res.status} ${text}`, res.status, text);

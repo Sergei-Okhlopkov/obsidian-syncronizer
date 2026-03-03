@@ -23,7 +23,7 @@ export async function syncWithYandexWebdav(
 	baseFolder: string,
 	direction: SyncDirection
 ): Promise<SyncResult> {
-	const client = new YandexWebdavClient(baseUrl, login, password);
+	const client = new YandexWebdavClient(baseUrl, login, password, app);
 	const result: SyncResult = { uploaded: 0, downloaded: 0, errors: [] };
 
 	const files = app.vault.getFiles();
@@ -43,14 +43,14 @@ export async function syncWithYandexWebdav(
 				await client.createFolder(base);
 			} catch (createErr) {
 				result.errors.push(
-					"Не удалось создать папку на Диске: " +
+					"Не удалось создать папку на удалённом сервере: " +
 						(createErr instanceof Error ? createErr.message : String(createErr))
 				);
 				return result;
 			}
 			remoteFiles = [];
 		} else {
-			result.errors.push("Список файлов с Диска: " + msg);
+			result.errors.push("Список файлов с удалённого сервера: " + msg);
 			return result;
 		}
 	}

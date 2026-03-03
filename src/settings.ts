@@ -7,22 +7,19 @@ import {
 	type GoogleDriveTokens,
 } from "./google-drive/api";
 
-export type YandexSyncMethod = "api" | "webdav";
-
 export interface MyPluginSettings {
 	mySetting: string;
-	// Способ синхронизации с Яндекс.Диском
-	yandexSyncMethod: YandexSyncMethod;
-	// REST API
+	// Яндекс.Диск (только REST API)
 	yandexClientId: string;
 	yandexAccessToken: string;
-	// WebDAV
-	yandexWebdavUrl: string;
-	yandexWebdavLogin: string;
-	yandexWebdavPassword: string;
-	// Общее
 	yandexSyncFolder: string;
 	yandexSyncDirection: "upload" | "download" | "both";
+	// WebDAV (любое облако: Nextcloud, ownCloud, Яндекс и т.д.)
+	webdavUrl: string;
+	webdavLogin: string;
+	webdavPassword: string;
+	webdavSyncFolder: string;
+	webdavSyncDirection: "upload" | "download" | "both";
 	// Google Drive
 	googleDriveClientId: string;
 	googleDriveClientSecret: string;
@@ -35,14 +32,15 @@ export interface MyPluginSettings {
 
 export const DEFAULT_SETTINGS: MyPluginSettings = {
 	mySetting: "default",
-	yandexSyncMethod: "api",
 	yandexClientId: "",
 	yandexAccessToken: "",
-	yandexWebdavUrl: "https://webdav.yandex.ru",
-	yandexWebdavLogin: "",
-	yandexWebdavPassword: "",
 	yandexSyncFolder: "Obsidian",
 	yandexSyncDirection: "both",
+	webdavUrl: "",
+	webdavLogin: "",
+	webdavPassword: "",
+	webdavSyncFolder: "Obsidian",
+	webdavSyncDirection: "both",
 	googleDriveClientId: "",
 	googleDriveClientSecret: "",
 	googleDriveAccessToken: "",
@@ -54,10 +52,8 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 
 const YANDEX_AUTH_URL = "https://oauth.yandex.ru/authorize?response_type=token&client_id=";
 
-const INSTRUCTIONS: Record<YandexSyncMethod, string> = {
-	api: "1) Зайдите на oauth.yandex.ru и создайте приложение. 2) Укажите Redirect URI: https://oauth.yandex.ru/verification_code. 3) Вставьте Client ID ниже и нажмите «Открыть страницу авторизации». 4) Войдите в аккаунт и скопируйте токен со страницы в поле «Токен».",
-	webdav: "1) Используйте логин и пароль от аккаунта Яндекса (или пароль приложения из настроек безопасности). 2) URL по умолчанию: https://webdav.yandex.ru. 3) Укажите папку на Диске, с которой будет синхронизироваться хранилище.",
-};
+const YANDEX_INSTRUCTION =
+	"1) Зайдите на oauth.yandex.ru и создайте приложение. 2) Укажите Redirect URI: https://oauth.yandex.ru/verification_code. 3) Вставьте Client ID ниже и нажмите «Открыть страницу авторизации». 4) Войдите в аккаунт и скопируйте токен со страницы в поле «Токен». Для синхронизации Яндекс.Диска по WebDAV используйте раздел «WebDAV (любое облако)» с URL https://webdav.yandex.ru.";
 
 export class SampleSettingTab extends PluginSettingTab {
 	plugin: SyncronizerPlugin;
@@ -72,113 +68,52 @@ export class SampleSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		// Выбор способа синхронизации
-		new Setting(containerEl)
-			.setName("Способ синхронизации с Яндекс.Диском")
-			.setDesc("Через REST API (OAuth-токен) или WebDAV (логин и пароль)")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("api", "Яндекс.Диск — REST API")
-					.addOption("webdav", "Яндекс.Диск — WebDAV")
-					.setValue(this.plugin.settings.yandexSyncMethod)
-					.onChange(async (value: YandexSyncMethod) => {
-						this.plugin.settings.yandexSyncMethod = value;
+		// ——— Яндекс.Диск (REST API) ———
+		containerEl.createEl("h2", { text: "Яндекс.Диск" });
+		const yandexInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
+		yandexInstr.createEl("strong", { text: "Как подключить: " });
+		yandexInstr.appendText(YANDEX_INSTRUCTION);
+		const apiSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
+		new Setting(apiSection)
+			.setName("Client ID")
+			.setDesc("ID приложения из OAuth (oauth.yandex.ru)")
+			.addText((text) =>
+				text
+					.setPlaceholder("Client ID")
+					.setValue(this.plugin.settings.yandexClientId)
+					.onChange(async (value) => {
+						this.plugin.settings.yandexClientId = value;
 						await this.plugin.saveSettings();
-						this.display();
 					})
 			);
+		new Setting(apiSection)
+			.setName("OAuth-токен")
+			.setDesc("Токен со страницы авторизации")
+			.addText((text) => {
+				text
+					.setPlaceholder("Вставьте токен")
+					.setValue(this.plugin.settings.yandexAccessToken)
+					.onChange(async (value) => {
+						this.plugin.settings.yandexAccessToken = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = "password";
+			});
+		new Setting(apiSection)
+			.setName("Получить токен")
+			.setDesc("Открыть страницу авторизации в браузере")
+			.addButton((btn) =>
+				btn.setButtonText("Открыть страницу авторизации").onClick(() => {
+					const clientId = this.plugin.settings.yandexClientId?.trim();
+					if (!clientId) return;
+					window.open(YANDEX_AUTH_URL + encodeURIComponent(clientId), "_blank");
+				})
+			);
 
-		// Инструкция
-		const method = this.plugin.settings.yandexSyncMethod || "api";
-		const instrEl = containerEl.createDiv({ cls: "synchronizer-instruction" });
-		instrEl.createEl("strong", { text: "Как подключить: " });
-		instrEl.appendText(INSTRUCTIONS[method]);
-
-		const apiSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
-		if (method === "api") {
-			new Setting(apiSection)
-				.setName("Client ID")
-				.setDesc("ID приложения из OAuth (oauth.yandex.ru)")
-				.addText((text) =>
-					text
-						.setPlaceholder("Client ID")
-						.setValue(this.plugin.settings.yandexClientId)
-						.onChange(async (value) => {
-							this.plugin.settings.yandexClientId = value;
-							await this.plugin.saveSettings();
-						})
-				);
-
-			new Setting(apiSection)
-				.setName("OAuth-токен")
-				.setDesc("Токен со страницы авторизации")
-				.addText((text) => {
-					text
-						.setPlaceholder("Вставьте токен")
-						.setValue(this.plugin.settings.yandexAccessToken)
-						.onChange(async (value) => {
-							this.plugin.settings.yandexAccessToken = value;
-							await this.plugin.saveSettings();
-						});
-					text.inputEl.type = "password";
-				});
-
-			new Setting(apiSection)
-				.setName("Получить токен")
-				.setDesc("Открыть страницу авторизации в браузере")
-				.addButton((btn) =>
-					btn.setButtonText("Открыть страницу авторизации").onClick(() => {
-						const clientId = this.plugin.settings.yandexClientId?.trim();
-						if (!clientId) return;
-						window.open(YANDEX_AUTH_URL + encodeURIComponent(clientId), "_blank");
-					})
-				);
-		} else {
-			new Setting(apiSection)
-				.setName("WebDAV URL")
-				.setDesc("Адрес WebDAV (обычно https://webdav.yandex.ru)")
-				.addText((text) =>
-					text
-						.setPlaceholder("https://webdav.yandex.ru")
-						.setValue(this.plugin.settings.yandexWebdavUrl)
-						.onChange(async (value) => {
-							this.plugin.settings.yandexWebdavUrl = (value || "").trim();
-							await this.plugin.saveSettings();
-						})
-				);
-
-			new Setting(apiSection)
-				.setName("Логин")
-				.setDesc("Логин Яндекса (email или телефон)")
-				.addText((text) =>
-					text
-						.setPlaceholder("Логин")
-						.setValue(this.plugin.settings.yandexWebdavLogin)
-						.onChange(async (value) => {
-							this.plugin.settings.yandexWebdavLogin = value;
-							await this.plugin.saveSettings();
-						})
-				);
-
-			new Setting(apiSection)
-				.setName("Пароль")
-				.setDesc("Пароль от аккаунта или пароль приложения")
-				.addText((text) => {
-					text
-						.setPlaceholder("Пароль")
-						.setValue(this.plugin.settings.yandexWebdavPassword)
-						.onChange(async (value) => {
-							this.plugin.settings.yandexWebdavPassword = value;
-							await this.plugin.saveSettings();
-						});
-					text.inputEl.type = "password";
-				});
-		}
-
-		// Общие настройки: папка и направление
+		// Папка и направление (Яндекс)
 		new Setting(containerEl)
 			.setName("Папка на Яндекс.Диске")
-			.setDesc("Путь к папке для синхронизации (например: Obsidian или Backup/Vault)")
+			.setDesc("Путь к папке для синхронизации (например: Obsidian или Backup/Vault). Для WebDAV с Яндексом используйте раздел «WebDAV (любое облако)».")
 			.addText((text) =>
 				text
 					.setPlaceholder("Obsidian")
@@ -200,6 +135,83 @@ export class SampleSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.yandexSyncDirection)
 					.onChange(async (value: "upload" | "download" | "both") => {
 						this.plugin.settings.yandexSyncDirection = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// ——— WebDAV (любое облако) ———
+		containerEl.createEl("h2", { text: "WebDAV (любое облако)" });
+		const wdInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
+		wdInstr.createEl("strong", { text: "Подходит для: " });
+		wdInstr.appendText(
+			"Nextcloud, ownCloud, Яндекс.Диск, Synology, InfiniCLOUD, Box, Dropbox (через WebDAV) и других сервисов с поддержкой WebDAV. Укажите URL сервера (например https://nextcloud.example.com/remote.php/dav/files/USERNAME/), логин и пароль."
+		);
+		const wdSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
+		new Setting(wdSection)
+			.setName("WebDAV URL")
+			.setDesc("Адрес WebDAV (корень хранилища или папки)")
+			.addText((text) =>
+				text
+					.setPlaceholder("https://webdav.example.com/ или https://webdav.yandex.ru")
+					.setValue(this.plugin.settings.webdavUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.webdavUrl = (value || "").trim();
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(wdSection)
+			.setName("Логин")
+			.setDesc("Логин WebDAV")
+			.addText((text) =>
+				text
+					.setPlaceholder("Логин")
+					.setValue(this.plugin.settings.webdavLogin)
+					.onChange(async (value) => {
+						this.plugin.settings.webdavLogin = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(wdSection)
+			.setName("Пароль")
+			.setDesc("Пароль WebDAV")
+			.addText((text) => {
+				text
+					.setPlaceholder("Пароль")
+					.setValue(this.plugin.settings.webdavPassword)
+					.onChange(async (value) => {
+						this.plugin.settings.webdavPassword = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = "password";
+			});
+		new Setting(containerEl)
+			.setName("Папка на WebDAV")
+			.setDesc(
+				"Путь к папке для синхронизации относительно URL (например: Obsidian или Backup/Vault). Для Nextcloud — подпапка в вашем пространстве файлов."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Obsidian")
+					.setValue(this.plugin.settings.webdavSyncFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.webdavSyncFolder = (value || "Obsidian").replace(
+							/^\/+/,
+							""
+						);
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Направление синхронизации (WebDAV)")
+			.setDesc("Что синхронизировать по WebDAV")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("both", "Двусторонняя (загрузка и выгрузка)")
+					.addOption("upload", "Только выгрузка (хранилище → WebDAV)")
+					.addOption("download", "Только загрузка (WebDAV → хранилище)")
+					.setValue(this.plugin.settings.webdavSyncDirection)
+					.onChange(async (value: "upload" | "download" | "both") => {
+						this.plugin.settings.webdavSyncDirection = value;
 						await this.plugin.saveSettings();
 					})
 			);
