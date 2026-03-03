@@ -24,6 +24,7 @@ function parsePropfindXml(xmlText: string, basePath: string): WebdavResource[] {
 
 	for (let i = 0; i < responses.length; i++) {
 		const res = responses[i];
+		if (!res) continue;
 		const hrefEl = res.getElementsByTagNameNS("DAV:", "href")[0];
 		if (!hrefEl?.textContent) continue;
 
@@ -53,7 +54,8 @@ function parsePropfindXml(xmlText: string, basePath: string): WebdavResource[] {
 		if (!prop) continue;
 
 		const resourcetype = prop.getElementsByTagNameNS("DAV:", "resourcetype")[0];
-		const collection = resourcetype?.getElementsByTagNameNS("DAV:", "collection").length > 0;
+		const collection =
+			(resourcetype?.getElementsByTagNameNS("DAV:", "collection")?.length ?? 0) > 0;
 		const getlastmodified = prop.getElementsByTagNameNS("DAV:", "getlastmodified")[0];
 		const getcontentlength = prop.getElementsByTagNameNS("DAV:", "getcontentlength")[0];
 		const modified = getlastmodified?.textContent?.trim();

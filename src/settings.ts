@@ -1,5 +1,11 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import SyncronizerPlugin from "./main";
+import {
+	getGoogleAuthUrl,
+	exchangeCodeForTokens,
+	GOOGLE_REDIRECT_URI,
+	type GoogleDriveTokens,
+} from "./google-drive/api";
 
 export type YandexSyncMethod = "api" | "webdav";
 
@@ -17,6 +23,14 @@ export interface MyPluginSettings {
 	// Общее
 	yandexSyncFolder: string;
 	yandexSyncDirection: "upload" | "download" | "both";
+	// Google Drive
+	googleDriveClientId: string;
+	googleDriveClientSecret: string;
+	googleDriveAccessToken: string;
+	googleDriveRefreshToken: string;
+	googleDriveExpiryDate: number;
+	googleDriveSyncFolder: string;
+	googleDriveSyncDirection: "upload" | "download" | "both";
 }
 
 export const DEFAULT_SETTINGS: MyPluginSettings = {
@@ -29,6 +43,13 @@ export const DEFAULT_SETTINGS: MyPluginSettings = {
 	yandexWebdavPassword: "",
 	yandexSyncFolder: "Obsidian",
 	yandexSyncDirection: "both",
+	googleDriveClientId: "",
+	googleDriveClientSecret: "",
+	googleDriveAccessToken: "",
+	googleDriveRefreshToken: "",
+	googleDriveExpiryDate: 0,
+	googleDriveSyncFolder: "Obsidian",
+	googleDriveSyncDirection: "both",
 };
 
 const YANDEX_AUTH_URL = "https://oauth.yandex.ru/authorize?response_type=token&client_id=";
@@ -179,6 +200,134 @@ export class SampleSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.yandexSyncDirection)
 					.onChange(async (value: "upload" | "download" | "both") => {
 						this.plugin.settings.yandexSyncDirection = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// ——— Google Drive ———
+		containerEl.createEl("h2", { text: "Google Drive" });
+		const gdInstr = containerEl.createDiv({ cls: "synchronizer-instruction" });
+		gdInstr.createEl("strong", { text: "Как подключить: " });
+		gdInstr.appendText(
+			`1) В Google Cloud Console создайте проект и включите Google Drive API. 2) Создайте учётные данные OAuth 2.0: тип «Веб-приложение» (Web application). 3) В разделе «Authorized redirect URIs» добавьте ровно такой URI: ${GOOGLE_REDIRECT_URI} (скопируйте без изменений). 4) Укажите Client ID и Client Secret ниже. 5) Нажмите «Открыть страницу авторизации», войдите в Google; после перенаправления на страницу с ошибкой (ничего не открыто на порту) скопируйте из адресной строки параметр code (часть после code= и до &) или весь URL. 6) Вставьте в поле ниже и нажмите «Получить токены».`
+		);
+		const gdSection = containerEl.createDiv({ cls: "synchronizer-method-section" });
+		new Setting(gdSection)
+			.setName("Client ID")
+			.setDesc("Идентификатор клиента OAuth 2.0")
+			.addText((text) =>
+				text
+					.setPlaceholder("Client ID")
+					.setValue(this.plugin.settings.googleDriveClientId)
+					.onChange(async (value) => {
+						this.plugin.settings.googleDriveClientId = value;
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(gdSection)
+			.setName("Client Secret")
+			.setDesc("Секрет клиента OAuth 2.0")
+			.addText((text) => {
+				text
+					.setPlaceholder("Client Secret")
+					.setValue(this.plugin.settings.googleDriveClientSecret)
+					.onChange(async (value) => {
+						this.plugin.settings.googleDriveClientSecret = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = "password";
+			});
+		new Setting(gdSection)
+			.setName("Авторизация")
+			.setDesc("Открыть страницу входа в Google и получить код")
+			.addButton((btn) =>
+				btn.setButtonText("Открыть страницу авторизации").onClick(() => {
+					const id = this.plugin.settings.googleDriveClientId?.trim();
+					if (!id) {
+						new Notice("Укажите Client ID.");
+						return;
+					}
+					window.open(getGoogleAuthUrl(id), "_blank");
+				})
+			);
+		let authCode = "";
+		const extractCode = (value: string): string => {
+			const v = value.trim();
+			const match = v.match(/[?&]code=([^&]+)/);
+			return match ? decodeURIComponent(match[1] ?? "") : v;
+		};
+		new Setting(gdSection)
+			.setName("Код авторизации")
+			.setDesc(
+				`Вставьте параметр code из URL после перенаправления на ${GOOGLE_REDIRECT_URI} (или весь URL)`
+			)
+			.addText((text) =>
+				text.setPlaceholder(`code=... или ${GOOGLE_REDIRECT_URI}/?code=...`).onChange((value) => {
+					authCode = extractCode(value);
+				})
+			)
+			.addButton((btn) =>
+				btn.setButtonText("Получить токены").onClick(async () => {
+					const id = this.plugin.settings.googleDriveClientId?.trim();
+					const secret = this.plugin.settings.googleDriveClientSecret?.trim();
+					const code = authCode;
+					if (!id || !secret) {
+						new Notice("Укажите Client ID и Client Secret.");
+						return;
+					}
+					if (!code) {
+						new Notice("Вставьте код авторизации.");
+						return;
+					}
+					try {
+						const tokens: GoogleDriveTokens = await exchangeCodeForTokens(
+							id,
+							secret,
+							code
+						);
+						this.plugin.settings.googleDriveAccessToken = tokens.access_token;
+						this.plugin.settings.googleDriveRefreshToken =
+							tokens.refresh_token ?? this.plugin.settings.googleDriveRefreshToken;
+						this.plugin.settings.googleDriveExpiryDate =
+							tokens.expiry_date ?? 0;
+						await this.plugin.saveSettings();
+						new Notice("Токены Google Drive сохранены.");
+						this.display();
+					} catch (e) {
+						new Notice(
+							"Ошибка получения токенов: " +
+								(e instanceof Error ? e.message : String(e))
+						);
+					}
+				})
+			);
+		new Setting(containerEl)
+			.setName("Папка на Google Drive")
+			.setDesc(
+				"Имя или путь к папке для синхронизации (например: Obsidian или Backup/Vault)"
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Obsidian")
+					.setValue(this.plugin.settings.googleDriveSyncFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.googleDriveSyncFolder = (
+							value || "Obsidian"
+						).replace(/^\/+/, "");
+						await this.plugin.saveSettings();
+					})
+			);
+		new Setting(containerEl)
+			.setName("Направление синхронизации (Google Drive)")
+			.setDesc("Что синхронизировать с Google Drive")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("both", "Двусторонняя (загрузка и выгрузка)")
+					.addOption("upload", "Только выгрузка (хранилище → Drive)")
+					.addOption("download", "Только загрузка (Drive → хранилище)")
+					.setValue(this.plugin.settings.googleDriveSyncDirection)
+					.onChange(async (value: "upload" | "download" | "both") => {
+						this.plugin.settings.googleDriveSyncDirection = value;
 						await this.plugin.saveSettings();
 					})
 			);

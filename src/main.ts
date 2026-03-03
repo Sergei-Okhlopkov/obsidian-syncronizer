@@ -4,6 +4,8 @@ import { syncWithYandex } from "./yandex/sync";
 import { syncWithYandexWebdav } from "./yandex/sync-webdav";
 import { YandexDiskApiError } from "./yandex/api";
 import { YandexWebdavError } from "./yandex/webdav";
+import { GoogleDriveApi, GoogleDriveApiError } from "./google-drive/api";
+import { syncWithGoogleDrive } from "./google-drive/sync";
 
 export default class SyncronizerPlugin extends Plugin {
 	settings: MyPluginSettings;
@@ -15,12 +17,15 @@ export default class SyncronizerPlugin extends Plugin {
 		this.addRibbonIcon("cloud", "Синхронизация с Яндекс.Диском", () => {
 			this.runYandexSync();
 		});
+		this.addRibbonIcon("cloud-upload", "Синхронизация с Google Drive", () => {
+			this.runGoogleDriveSync();
+		});
 
 		// Кнопка синхронизации в строке состояния внизу окна
 		const statusBarItem = this.addStatusBarItem();
 		statusBarItem.createEl("span", { cls: "syncronizer-status-bar clickable" }, (el) => {
 			el.textContent = "☁ Синхронизация";
-			el.title = "Синхронизировать с Яндекс.Диском";
+			el.title = "Синхронизировать с Яндекс.Диском / Google Drive (см. команды)";
 			el.addEventListener("click", () => this.runYandexSync());
 		});
 
@@ -29,6 +34,11 @@ export default class SyncronizerPlugin extends Plugin {
 			id: "yandex-sync",
 			name: "Синхронизировать с Яндекс.Диском",
 			callback: () => this.runYandexSync(),
+		});
+		this.addCommand({
+			id: "google-drive-sync",
+			name: "Синхронизировать с Google Drive",
+			callback: () => this.runGoogleDriveSync(),
 		});
 
 		// Остальные команды (образец)
@@ -118,6 +128,74 @@ export default class SyncronizerPlugin extends Plugin {
 		} catch (e) {
 			this.handleSyncError(e, "webdav");
 		}
+	}
+
+	async runGoogleDriveSync(): Promise<void> {
+		const clientId = this.settings.googleDriveClientId?.trim();
+		const clientSecret = this.settings.googleDriveClientSecret?.trim();
+		const accessToken = this.settings.googleDriveAccessToken?.trim();
+		if (!clientId || !clientSecret || !accessToken) {
+			new Notice(
+				"Настройте Google Drive: Client ID, Client Secret и получите токены в настройках плагина."
+			);
+			return;
+		}
+		const folder = this.settings.googleDriveSyncFolder?.trim() || "Obsidian";
+		const direction = this.settings.googleDriveSyncDirection;
+		new Notice("Синхронизация с Google Drive…");
+		try {
+			const api = new GoogleDriveApi(
+				{
+					access_token: accessToken,
+					refresh_token: this.settings.googleDriveRefreshToken || undefined,
+					expiry_date: this.settings.googleDriveExpiryDate || undefined,
+				},
+				clientId,
+				clientSecret
+			);
+			const result = await syncWithGoogleDrive(
+				this.app,
+				api,
+				folder,
+				direction
+			);
+			const updated = api.getTokens();
+			this.settings.googleDriveAccessToken = updated.access_token;
+			if (updated.refresh_token)
+				this.settings.googleDriveRefreshToken = updated.refresh_token;
+			if (updated.expiry_date)
+				this.settings.googleDriveExpiryDate = updated.expiry_date;
+			await this.saveSettings();
+			this.showSyncResult(result, () => {
+				new Notice(
+					"Токен Google Drive недействителен. Получите новые токены в настройках плагина.",
+					8000
+				);
+			});
+		} catch (e) {
+			this.handleGoogleDriveSyncError(e);
+		}
+	}
+
+	private handleGoogleDriveSyncError(e: unknown): void {
+		const message =
+			e instanceof GoogleDriveApiError
+				? e.message
+				: e instanceof Error
+					? e.message
+					: String(e);
+		new Notice("Ошибка синхронизации Google Drive: " + message);
+		if (
+			message.includes("401") ||
+			message.includes("invalid_grant") ||
+			message.includes("Token")
+		) {
+			new Notice(
+				"Токен недействителен или истёк. Настройки плагина → Google Drive → «Получить токены».",
+				8000
+			);
+		}
+		console.error("Synchronizer Google Drive sync error:", e);
 	}
 
 	private showSyncResult(
